@@ -8,5 +8,5 @@ While some features were either modified or removed it remains really close to p
 
 ## P2 is not a language
 While yes on a technicality it is one, it doesn't have a standard library like most language
-Since P2's only goes it to turn most python code into object files, to be linked etc it only has basic python functions HOWEVER it does come with
+Since P2's only goal it to turn most python code into object files, to be linked etc it only has basic python functions HOWEVER it does come with
 classes, and every python function / feature that doesn't need the `import` keyword
