@@ -1,0 +1,3 @@
+#!/bin/bash
+
+antlr4 -Dlanguage=Python3 PythonLexer.g4 PythonParser.g4 -visitor -o gen

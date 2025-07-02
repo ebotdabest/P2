@@ -100,6 +100,13 @@ class ElifBlock:
         self.expr = expr
         self.block = block
 
+@auto_str
+class ImportStmt:
+    def __init__(self, func_name, args, return_type):
+        self.func_name = func_name
+        self.args = args
+        self.return_type = return_type
+
 def bool_maker(value):
     if value == "True":
         return 1
