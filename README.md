@@ -1,12 +1,26 @@
-# P2 aka PTO aka Python To Object
+# P2 (also called PTO, short for Python To Object)
 
-Unfortunately PTO doesn't mean Paid Time Off, but rather Python To Object
-The point is to create a language that feels similar in synthax and experience to python, but make it useable in a C ABI setting
-This would enable a python like synthax to be usable in low-level settings on a whole new level
-P2 aims to deliver this.
-While some features were either modified or removed it remains really close to python
+No, PTO is not Paid Time Off.  
+It stands for Python To Object. This is a compiled language that looks and feels like Python, but produces real object files ready for use in low level systems.
+
+P2 is built to bring Python-style syntax into environments where Python normally cannot go. It compiles your code into C ABI compatible object files. That means you can link it into a kernel, call it from C or C++, or embed it into anything that expects native code.
+
+The language keeps what works from Python. It keeps the syntax and structure you know, while removing or rewriting the parts that do not make sense for static compilation or system level programming.
+
+### What P2 Offers
+
+- Compiles to object files using LLVM
+- Works directly with the C ABI
+- Has no runtime unless you choose one
+- Requires type hints and uses static types only
+- Feels like Python but gives you full control
+- Lets you choose between no standard library, a minimal one, or a full one
+
+P2 is not a scripting language pretending to be something else.  
+It is a system language with Python roots, meant for places Python was never meant to reach.
+
 
 ## P2 is not a language
-While yes on a technicality it is one, it doesn't have a standard library like most language
-Since P2's only goal it to turn most python code into object files, to be linked etc it only has basic python functions HOWEVER it does come with
-classes, and every python function / feature that doesn't need the `import` keyword
+While P2 is technically its own language, it does not include a standard library in the traditional sense. P2's goal is to turn Python-like code into object files that can be linked into larger projects. Because of that, it only supports core language features and a small set of built-in functions.
+
+It does include classes and most native Python functions that do not require an `import` statement. Features like `zip`, `range`, `any`, and `max` etc are available, but anything that would normally come from a module must be linked in separately or provided by the P2 standard layers.
