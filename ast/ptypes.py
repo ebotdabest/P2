@@ -107,6 +107,28 @@ class ImportStmt:
         self.args = args
         self.return_type = return_type
 
+
+class VAArgs:
+    pass
+
+@auto_str
+class GlobalStmt:
+    def __init__(self, symbol_names):
+        self.names = symbol_names
+
+@auto_str
+class TernaryOp:
+    def __init__(self, cond, true, false):
+        self.cond = cond
+        self.true = true
+        self.false = false
+
+@auto_str
+class UnaryOp:
+    def __init__(self, pref, op):
+        self.pref = pref
+        self.op = op
+
 def bool_maker(value):
     if value == "True":
         return 1
@@ -115,9 +137,13 @@ def bool_maker(value):
     else:
         return -1
 
+def str_maker(value: str) -> list[int]:
+    return [ord(char) for char in bytes(value, "utf-8").decode("unicode_escape")]
+
 usable_types = {
     "int": int,
     "double": float,
     "float": float,
-    "bool": bool_maker
+    "bool": bool_maker,
+    "str": str_maker
 }

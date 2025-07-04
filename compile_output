@@ -1,0 +1,6 @@
+#!/usr/bin/bash
+
+llvm-link output.ll std/main.ll -o output.bc
+llc output.bc -filetype=obj -o output.o
+clang output.o -o program
+rm output.bc

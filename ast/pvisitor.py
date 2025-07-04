@@ -1,287 +1,369 @@
-from ast.gen.PythonParser import PythonParser
+from ast import PythonParser
 from ast.gen.PythonParserVisitor import PythonParserVisitor
 from ast.ptypes import *
-from errors import NoTypeError, SymbolNotFound
-from antlr4.tree.Tree import TerminalNodeImpl
+from errors import NoTypeError
+from typing import List
 import re
-
-class CurrentReader:
-    def __init__(self):
-        self.value = None
 
 class P2Visitor(PythonParserVisitor):
     def __init__(self):
         super().__init__()
         self.statements = []
-
         self.scope = {}
 
     def read_result(self):
         return self.statements
 
-
     def send_to_top(self, stmt):
         self.statements.append(stmt)
 
-    def visitPower(self, ctx):
-        return self.visit(ctx.await_primary())
-
-    def visitFactor(self, ctx):
-        return self.visit(ctx.power())
-
-    def visitFunction_def_raw(self, ctx: PythonParser.Function_def_rawContext):
+    def visitFunction_def_raw(self, ctx):
         func_name = ctx.name().getText()
-        return_type = None
+        return_type = self._extract_return_type(ctx)
 
-        for i, c in enumerate(ctx.children):
-            if c.getText() == "->":
-                return_type = ctx.getChild(i + 1).getText()
-                break
+        args = self._extract_parameters(ctx)
+        body = self._parse_block(ctx.block())
+        func = FunctionDefinition(func_name, args, body, return_type)
+        self.send_to_top(func)
 
+    def _extract_return_type(self, ctx):
+        # Find "-> type"
+        for i, child in enumerate(ctx.children):
+            if child.getText() == "->":
+                return ctx.getChild(i + 1).getText()
+        return None
+
+    def _extract_parameters(self, ctx) -> List:
         args = []
-        params = ctx.params()
-        if params:
-            params = params.parameters()
-            for p in params.param_no_default():
-                if not p.param().annotation():
-                    raise NoTypeError(p.param().name().getText())
-                tpe = self.visit(p.param().annotation()).var
-                name = p.param().name().getText()
-                args.append(FuncArg(name, tpe))
+        param_ctx = ctx.params()
+        if not param_ctx:
+            return args
 
-            for p in params.param_with_default():
-                if not p.param().annotation():
-                    raise NoTypeError(p.param().name().getText())
-                tpe = p.param().annotation().getText()
-                name = p.param().name().getText()
-                default = self.visit(p.default_assignment())
-                args.append(FuncDefaultArg(name, tpe, default))
+        for param in param_ctx.parameters().param_no_default():
+            param = param.param()
+            if not param.annotation():
+                raise NoTypeError(param.name().getText())
+            name = param.name().getText()
+            tpe = self.visit(param.annotation()).var
+            args.append(FuncArg(name, tpe))
 
+        for param in param_ctx.parameters().param_with_default():
+            param = param.param()
+            if not param.annotation():
+                raise NoTypeError(param.name().getText())
+            name = param.name().getText()
+            tpe = param.annotation().getText()
+            default = self.visit(param_ctx.parameters().default_assignment())
+            args.append(FuncDefaultArg(name, tpe, default))
+
+        return args
+
+    def _parse_block(self, block_ctx):
         statements = []
-        for stmt in ctx.block().statements().statement():
-            result = self.visit(stmt)
+
+        if not block_ctx or not block_ctx.statements():
+            return statements
+
+        for stmt_ctx in block_ctx.statements().statement():
+            result = self.visit(stmt_ctx)
 
             if result is not None:
                 statements.append(result)
 
-        func = FunctionDefinition(func_name, args, statements, return_type)
-        self.statements.append(func)
+        return statements
 
-    def visitAssignment(self, ctx: PythonParser.AssignmentContext):
-        name = ctx.children[0]
-        if isinstance(name, PythonParser.Star_targetsContext):
-            action = ctx.children[1]
-            value = self.visit(ctx.children[2])
-            stmt = VariableOp(name.getText(), value, action.getText())
+    def visitAssignment(self, ctx):
+        if ctx.name():
+
+            var_name = ctx.name().getText()
+            tpe = self.visit(ctx.expression()).var
+
+            value = None
+            if ctx.annotated_rhs():
+                value = self.visit(ctx.annotated_rhs())
+
+            stmt = VariableCreation(var_name, tpe, value)
+            self.scope[var_name] = stmt
+
             return stmt
 
-        if isinstance(name, PythonParser.NameContext):
-            tpe = ctx.children[2].getText()
-            value = self.visit(ctx.children[4])
-            stmt = VariableCreation(name.getText(), tpe, value)
-            self.scope[name.getText()] = stmt
-            return stmt
 
-    def visitReturn_stmt(self, ctx:PythonParser.Return_stmtContext):
-        return ReturnStatement(self.visit(ctx.star_expressions()))
+        if ctx.augassign():
+            target = ctx.single_target().getText()
+            op = ctx.augassign().getText()
+            value = self.visit(ctx.star_expressions())
+            return VariableOp(target, value, op)
 
 
-    def visitPrimary(self, ctx:PythonParser.PrimaryContext):
-        if len(ctx.children) >= 3 and ctx.children[1].getText() == "(" and ctx.children[-1].getText() == ")":
-            func_name = ctx.children[0].getText()
-            args = []
-            if ctx.arguments():
-                for expr in ctx.arguments().args().expression():
-                    value = self.visit(expr)
-                    args.append(value)
-            sent = FuncCall(func_name, args)
-            return sent
+        if ctx.star_targets():
+            target = ctx.star_targets().getText()
+            value = self.visit(ctx.star_expressions())
+            return VariableOp(target, value, "=")
 
-        for c in ctx.atom().children:
-            if isinstance(c, PythonParser.StringsContext):
-                return Constant(c.string(0).getText()[1:-1], 'str')
-            else:
-                value: str = c.getText()
-                as_bool = usable_types["bool"](value)
-                if as_bool != -1:
-                    return Constant(value, "bool")
+        raise Exception("Unhandled assignment case")
 
-                if any(char.isalpha() for char in value):
-                    return VariableReference(value)
-                parent = ctx.parentCtx
-                while parent.parentCtx and type(parent) != PythonParser.AssignmentContext:
-                    parent = parent.parentCtx
+    def visitAnnotated_rhs(self, ctx):
+        if ctx.yield_expr():
+            return self.visit(ctx.yield_expr())
+        return self.visit(ctx.star_expressions())
 
-                if isinstance(parent, PythonParser.File_inputContext):
-                    parent = ctx.parentCtx
-                    while parent.parentCtx and type(parent) != PythonParser.Function_def_rawContext:
-                        parent = parent.parentCtx
-                    tpe = None
-                    for i, c in enumerate(parent.children):
-                        if c.getText() == "->":
-                            tpe = self.visit(parent.children[i + 1]).var
-                else:
-                    if len(parent.children) == 3:
-                        var_name = parent.children[0].getText()
-                        if var_name not in self.scope.keys():
-                            raise SymbolNotFound(var_name)
-                        tpe = self.scope[var_name].tpe
-                    else:
-                        tpe = parent.children[2].getText()
+    def visitBlock(self, ctx):
+        statements = []
+        for stmt_ctx in ctx.statements().statement():
+            stmt = self.visit(stmt_ctx)
+            if stmt:
+                statements.append(stmt)
+        return statements
 
-                return Constant(value, tpe)
-
-        return self.visitChildren(ctx)
-
-    def visitSum(self, ctx: PythonParser.SumContext):
-        if len(ctx.children) == 1:
-            return self.visit(ctx.children[0])
-
-        left = self.visit(ctx.children[0])
-        i = 1
-        while i < len(ctx.children) - 1:
-            op = ctx.children[i].getText()
-            right = self.visit(ctx.children[i + 1])
-            left = BinaryOp(left, op, right)
-            i += 2
-        return left
-
-    def visitTerm(self, ctx: PythonParser.TermContext):
-        if len(ctx.children) == 1:
-            return self.visit(ctx.children[0])
-
-        left = self.visit(ctx.children[0])
-        i = 1
-        while i < len(ctx.children) - 1:
-            op = ctx.children[i].getText()
-            right = self.visit(ctx.children[i + 1])
-            left = BinaryOp(left, op, right)
-            i += 2
-        return left
-
-
-    def visitIf_stmt(self, ctx: PythonParser.If_stmtContext):
-        expr = self.visit(ctx.children[1])
-        statements = self.visit(ctx.children[3])
+    def visitIf_stmt(self, ctx):
+        # if <cond>: <block>
+        condition = self.visit(ctx.named_expression())
+        then_block = self.visit(ctx.block())
 
         elif_blocks = []
         else_block = []
 
-        for c in ctx.children[3:]:
-            if isinstance(c, PythonParser.Elif_stmtContext):
-                chain_complex = self.visit(c)
-                flat = self.flatten(chain_complex)
-                elif_blocks.extend(flat[:-1])
-                else_block = flat[-1]
-            elif isinstance(c, PythonParser.Else_blockContext):
-                else_block = self.visit(c)
-
-        return IfStatement(expr, statements, elif_blocks, else_block or [])
-
-    def visitStatement(self, ctx: PythonParser.StatementContext):
-        for child in ctx.children:
-            return self.visit(child)
-
-    def visitSimple_stmts(self, ctx:PythonParser.Simple_stmtsContext):
-        return self.visit(ctx.simple_stmt()[0])
-
-    def visitBlock(self, ctx: PythonParser.BlockContext):
-        statements = []
-        for c in ctx.children:
-            if not isinstance(c, PythonParser.StatementsContext):
-                continue
-
-            for stmt in c.statement():
-                result = self.visit(stmt)
-                statements.append(result)
-
-        return statements
-
-    def visitElif_stmt(self, ctx:PythonParser.Elif_stmtContext):
-        expr = self.visit(ctx.children[1])
-        block = self.visit(ctx.children[3])
         if ctx.elif_stmt():
-            last = self.visit(ctx.children[-1])
+            for child in ctx.elif_stmt():
+                elif_block, tail = self.visit(child)
+                elif_blocks.append(elif_block)
 
-            return ElifBlock(expr, block), last
+                while tail:
+                    elif_block, tail = tail
+                    elif_blocks.append(elif_block)
+
+        if ctx.else_block():
+            else_block = self.visit(ctx.else_block())
+
+        return IfStatement(condition, then_block, elif_blocks, else_block)
+
+    def visitElif_stmt(self, ctx):
+        condition = self.visit(ctx.named_expression())
+        block = self.visit(ctx.block())
+
+        # If there's more to the chain (nested elif or else), return it too
+        if ctx.elif_stmt():
+            tail = self.visit(ctx.elif_stmt())
+            return ElifBlock(condition, block), tail
         elif ctx.else_block():
-            last = self.visit(ctx.children[-1])
-
-            return ElifBlock(expr, block), last
+            tail = (ElifBlock(condition, block), None)
+            else_block = self.visit(ctx.else_block())
+            return ElifBlock(condition, block), (None, else_block)
         else:
-            return ElifBlock(expr, block), None
+            return ElifBlock(condition, block), None
 
-    def visitElse_block(self, ctx:PythonParser.Else_blockContext):
+    def visitElse_block(self, ctx):
         return self.visit(ctx.block())
 
-    def visitNamed_expression(self, ctx:PythonParser.Named_expressionContext):
+    def _parse_literal_or_variable(self, text):
+        # Literal bool
+        if text in ("True", "False"):
+            return Constant(text, "bool")
+
+        # String literal
+        if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+            return Constant(text[1:-1], "str")
+
+        # Float
+        if "." in text and self._is_float(text):
+            return Constant(text, "float")
+
+        # Int
+        if text.isdigit() or (text.startswith('-') and text[1:].isdigit()):
+            return Constant(text, "int")
+
+        # Fallback: must be a variable reference
+        return VariableReference(text)
+
+    def _is_float(self, s):
+        try:
+            float(s)
+            return True
+        except ValueError:
+            return False
+
+    def visitPrimary(self, ctx):
+        if len(ctx.children) > 1 and ctx.children[1].getText() == "(":
+            func_name = ctx.children[0].getText()
+            if ctx.arguments():
+                args = [self.visit(expr) for expr in ctx.arguments().args().expression()]
+            else:
+                args = []
+            return FuncCall(func_name, args)
+
+        atom = ctx.atom()
+        if atom:
+            atom_text = atom.getText()
+            return self._parse_literal_or_variable(atom_text)
+
+
+        return self.visitChildren(ctx)
+
+    def visitSum(self, ctx):
+        return self._parse_bin_chain(ctx)
+
+    def visitStatement(self, ctx):
+        for child in ctx.children:
+            result = self.visit(child)
+            if result is not None:
+                return result
+        return None
+
+    def visitSimple_stmts(self, ctx):
+        for stmt in ctx.simple_stmt():
+            result = self.visit(stmt)
+            if result is not None:
+                return result
+        return None
+
+    def visitSimple_stmt(self, ctx):
+        for child in ctx.children:
+            result = self.visit(child)
+            if result is not None:
+                return result
+        return None
+
+    def visitTerm(self, ctx):
+        return self._parse_bin_chain(ctx)
+
+    def _parse_bin_chain(self, ctx):
+        if len(ctx.children) == 1:
+            return self.visitChildren(ctx)
+
+        left = self.visit(ctx.children[0])
+        i = 1
+        while i < len(ctx.children) - 1:
+            op = ctx.children[i].getText()
+            right = self.visit(ctx.children[i + 1])
+            left = BinaryOp(left, op, right)
+            i += 2
+        return left
+
+    def visitNamed_expression(self, ctx):
         tokens = [
-            "==",
-            ">=",
-            "<=",
-            ">",
-            "<",
-            "or",
-            "and",
-            "(",
-            ")"
+            "==", "!=", "<", "<=", ">", ">=",
+            "is", "is not", "in", "not in",
+            "and", "or", "(", ")"
         ]
 
-        tokens_sorted = sorted(tokens, key=lambda x: -len(x))
-        pattern = r'(' + '|'.join(re.escape(tok) for tok in tokens_sorted) + r')'
-
-        spaced = re.sub(pattern, r' \1 ', ctx.getText())
+        pattern = r"(" + "|".join(re.escape(tok) for tok in sorted(tokens, key=lambda x: -len(x))) + ")"
+        spaced = re.sub(pattern, r" \1 ", ctx.getText())  # Flatten it manually
 
         parts = []
         for part in spaced.strip().split():
             if part in tokens:
                 parts.append(ConditionToken(part))
+            elif part in ("True", "False"):
+                parts.append(Constant(part, "bool"))
+            elif part.isdigit():
+                parts.append(Constant(part, "int"))
+            elif "." in part and part.replace(".", "").isdigit():
+                parts.append(Constant(part, "float"))
+            elif (part.startswith('"') and part.endswith('"')) or (part.startswith("'") and part.endswith("'")):
+                parts.append(Constant(part[1:-1], "str"))
             else:
-                as_bool = usable_types["bool"](part)
-                if (part.startswith('"') and part.endswith('"')) or (part.startswith("'") and part.endswith("'")):
-                    parts.append(Constant(part[1:-1], "str"))
-                elif as_bool != -1:
-                    parts.append(Constant(part, "bool"))
-                elif "." in part:
-                    parts.append(Constant(part, "float"))
-                elif any(char.isalpha() for char in part):
-                    child = ctx.children[0]
-                    while not isinstance(child, PythonParser.SumContext):
-                        child = child.children[0]
-
-                    parts.append(self.visit(child))
-                else:
-                    parts.append(Constant(part, "int"))
+                parts.append(VariableReference(part))
         return parts
 
-    def visitImport_stmt(self, ctx:PythonParser.Import_stmtContext):
-        stmt: PythonParser.Import_sigContext = ctx.import_sig()
-        params = stmt.import_params()
+    def visitExpression(self, ctx):
+        if ctx.getChildCount() == 1:
+            return self.visitChildren(ctx)
+
+        cond = self.visit(ctx.getChild(1))
+        true_expr = self.visit(ctx.getChild(0))
+        false_expr = self.visit(ctx.getChild(4))
+        return TernaryOp(cond, true_expr, false_expr)
+
+    def visitDisjunction(self, ctx):
+        if ctx.getChildCount() == 1:
+            return self.visitChildren(ctx)
+
+        left = self.visit(ctx.getChild(0))
+        i = 1
+        while i < ctx.getChildCount():
+            op = ctx.getChild(i).getText()  # 'or'
+            right = self.visit(ctx.getChild(i + 1))
+            left = BinaryOp(left, op, right)
+            i += 2
+        return left
+
+    def visitConjunction(self, ctx):
+        if ctx.getChildCount() == 1:
+            return self.visitChildren(ctx)
+
+        left = self.visit(ctx.getChild(0))
+        i = 1
+        while i < ctx.getChildCount():
+            op = ctx.getChild(i).getText()  # 'and'
+            right = self.visit(ctx.getChild(i + 1))
+            left = BinaryOp(left, op, right)
+            i += 2
+        return left
+
+    def visitInversion(self, ctx):
+        if ctx.getChildCount() == 1:
+            return self.visitChildren(ctx)
+
+        operand = self.visit(ctx.getChild(1))
+        return UnaryOp("not", operand)
+
+    def visitComparison(self, ctx):
+        if ctx.getChildCount() == 1:
+            return self.visitChildren(ctx)
+
+        left = self.visit(ctx.getChild(0))
+        i = 1
+        while i < ctx.getChildCount() - 1:
+            op = ctx.getChild(i).getText()
+            right = self.visit(ctx.getChild(i + 1))
+            left = BinaryOp(left, op, right)
+            i += 2
+        return left
+
+    def visitImport_stmt(self, ctx):
+        sig = ctx.import_sig()
+        import_name = sig.name().getText()
+
+        header = sig.import_params_header()
         param_list = []
-        if params:
-            for param in params.import_param():
+        if header.import_params():
+            for param in header.import_params().import_param():
                 param_list.append(self.visit(param))
 
-        ret_tpe = stmt.import_return_type()
-        tpe = None
-        if ret_tpe:
-            tpe = ret_tpe.name().getText()
+        if header.import_va_args():
+            param_list.append(VAArgs())
 
-        self.statements.append(ImportStmt(stmt.name().getText(), param_list, tpe))
+        ret_type = None
+        if sig.import_return_type():
+            ret_type = sig.import_return_type().name().getText()
 
-    def visitImport_param(self, ctx:PythonParser.Import_paramContext):
-        print(ctx.children)
-        name = ctx.children[0].getText()
-        tpe = ctx.children[2].getText()
+        self.send_to_top(ImportStmt(import_name, param_list, ret_type))
+
+    def visitImport_param(self, ctx):
+        name = ctx.name(0).getText()
+        tpe = ctx.name(1).getText()
         return FuncArg(name, tpe)
+
+    def visitReturn_stmt(self, ctx):
+        if ctx.star_expressions():
+            value = self.visitChildren(ctx.star_expressions().star_expression()[0])
+        else:
+            value = None
+        return ReturnStatement(value)
+
+    def visitStar_expressions(self, ctx:PythonParser.Star_expressionsContext):
+        return self.visitChildren(ctx)
+
+    def visitStar_expression(self, ctx:PythonParser.Star_expressionContext):
+        return self.visitChildren(ctx)
+
+    def visitGlobal_stmt(self, ctx):
+        symbols = [n.getText() for n in ctx.name()]
+        self.send_to_top(GlobalStmt(symbols))
 
     def flatten(self, tup):
         flat = []
-        while type(tup[1]) == tuple:
+        while tup and isinstance(tup[0], ElifBlock):
             flat.append(tup[0])
             tup = tup[1]
-
-        flat.append(tup[0])
-        flat.append(tup[1])
-
-        return flat
+        return flat, tup[1] if tup else []

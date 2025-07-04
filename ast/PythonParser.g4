@@ -145,7 +145,14 @@ import_stmt
 // -----------------
 
 import_sig
-    : IMPORT name LPAR import_params? RPAR import_return_type?;
+    : IMPORT name LPAR import_params_header? RPAR import_return_type?;
+
+import_params_header
+    : import_params import_va_args?
+    | '...';
+
+import_va_args
+    : ',' '...';
 
 import_return_type
     : '->' name;

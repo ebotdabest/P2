@@ -1,18 +1,15 @@
 import sys
 import os.path as p
 from ast import parse_partial_context
-from compiler import compile_ast, run_module
-
+from compiler import compile_ast, run_module, compile_module, get_engine
+import subprocess as sp
+import os
 directory =sys.argv[0]
-def crawl_directory(dir):
-    ...
 
-result = parse_partial_context("""
-import user_input() -> int
+with open("test.p2") as f:
+    content = f.read()
 
-def main() -> int:
-    return -5
-""")
+result = parse_partial_context(content)
 
 # print(result[1].statements[1])
 
@@ -20,7 +17,12 @@ def main() -> int:
 # print(result[1].statements[1])
 module = compile_ast(result)
 print(module)
-func, engine = run_module(module)
-print(func())
+get_engine(module)
+sp.run([f"{os.getcwd()}/compile_output"])
+
+
+# compile_module(module)
+# func, engine = run_module(module)
+# print(func())
 
 # files = get_ast()
