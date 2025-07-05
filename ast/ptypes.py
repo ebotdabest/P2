@@ -129,6 +129,12 @@ class UnaryOp:
         self.pref = pref
         self.op = op
 
+@auto_str
+class SliceOp:
+    def __init__(self, var, slices):
+        self.var = var
+        self.slices = slices
+
 def bool_maker(value):
     if value == "True":
         return 1

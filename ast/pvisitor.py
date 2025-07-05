@@ -44,7 +44,7 @@ class P2Visitor(PythonParserVisitor):
             if not param.annotation():
                 raise NoTypeError(param.name().getText())
             name = param.name().getText()
-            tpe = self.visit(param.annotation()).var
+            tpe = self.visit(param.annotation())
             args.append(FuncArg(name, tpe))
 
         for param in param_ctx.parameters().param_with_default():
@@ -76,7 +76,8 @@ class P2Visitor(PythonParserVisitor):
         if ctx.name():
 
             var_name = ctx.name().getText()
-            tpe = self.visit(ctx.expression()).var
+
+            tpe = self.visit(ctx.expression())
 
             value = None
             if ctx.annotated_rhs():
@@ -87,7 +88,6 @@ class P2Visitor(PythonParserVisitor):
 
             return stmt
 
-
         if ctx.augassign():
             target = ctx.single_target().getText()
             op = ctx.augassign().getText()
@@ -96,11 +96,18 @@ class P2Visitor(PythonParserVisitor):
 
 
         if ctx.star_targets():
-            target = ctx.star_targets().getText()
+            target = ctx.star_targets()[0].getText()
             value = self.visit(ctx.star_expressions())
             return VariableOp(target, value, "=")
 
         raise Exception("Unhandled assignment case")
+
+    def visitSlices(self, ctx:PythonParser.SlicesContext):
+        parent: PythonParser.PrimaryContext = ctx.parentCtx
+        var = parent.primary().atom().name().getText()
+        slices = [s.getText() for s in ctx.slice_()]
+
+        return SliceOp(var, slices)
 
     def visitAnnotated_rhs(self, ctx):
         if ctx.yield_expr():
@@ -116,7 +123,6 @@ class P2Visitor(PythonParserVisitor):
         return statements
 
     def visitIf_stmt(self, ctx):
-        # if <cond>: <block>
         condition = self.visit(ctx.named_expression())
         then_block = self.visit(ctx.block())
 
@@ -156,23 +162,18 @@ class P2Visitor(PythonParserVisitor):
         return self.visit(ctx.block())
 
     def _parse_literal_or_variable(self, text):
-        # Literal bool
         if text in ("True", "False"):
             return Constant(text, "bool")
 
-        # String literal
         if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
             return Constant(text[1:-1], "str")
 
-        # Float
         if "." in text and self._is_float(text):
             return Constant(text, "float")
 
-        # Int
         if text.isdigit() or (text.startswith('-') and text[1:].isdigit()):
             return Constant(text, "int")
 
-        # Fallback: must be a variable reference
         return VariableReference(text)
 
     def _is_float(self, s):
@@ -190,6 +191,9 @@ class P2Visitor(PythonParserVisitor):
             else:
                 args = []
             return FuncCall(func_name, args)
+
+        if ctx.slices():
+            return self.visitSlices(ctx.slices())
 
         atom = ctx.atom()
         if atom:

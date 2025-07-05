@@ -13,12 +13,15 @@ class ObjectTracker:
         self.objs: List[HeapObject] = []
 
     def add_object(self, tpe, obj):
+        for o in self.objs:
+            if o.obj == obj:
+                return
         self.objs.append(HeapObject(tpe, obj))
 
     def free(self, scope_for_free, builder: ir.IRBuilder, exception: ir.Ret):
         for obj in self.objs:
-            if obj.obj == exception.return_value: continue
-            builder.call(scope_for_free[obj.tpe + "__free__"], [obj.obj])
+            if exception and not isinstance(exception, ir.Unreachable) and obj.obj == exception.return_value: continue
+            builder.call(scope_for_free[obj.tpe + "__free__"].value, [obj.obj])
 
     @classmethod
     def create_tracker(cls, func):

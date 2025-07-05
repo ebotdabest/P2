@@ -13,17 +13,16 @@ for file in files:
     with open(os.path.join(os.getcwd(), directory, file)) as f:
         content = f.read()
 
-    result = parse_partial_context(content)
-    module = compile_ast(result, file)
     print(f"======[{file}]======")
+    result = parse_partial_context(content)
+
+    module = compile_ast(result, file)
     modules.append(module)
 
 get_engine(modules[0], modules)
 
 compiled_files = " ".join([os.path.join(os.getcwd(), "p2ctemp", f)
                            for f in os.listdir(os.path.join(os.getcwd(), "p2ctemp"))])
-# print(f"llvm-link {compiled_files} std/main.ll -o output.bc")
-
 sp.run([f"{os.getcwd()}/compile_output", compiled_files])
 sp.run(["clang++", "-fPIE", "-pie", "output.o", "-o", "program"])
 print("COMPILED!")
