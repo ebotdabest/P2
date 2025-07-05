@@ -4,23 +4,29 @@ from ast import parse_partial_context
 from compiler import compile_ast, run_module, compile_module, get_engine
 import subprocess as sp
 import os
-directory =sys.argv[0]
 
-with open("test.p2") as f:
-    content = f.read()
+directory = sys.argv[1]
 
-result = parse_partial_context(content)
+files = os.listdir(directory)
+modules = []
+for file in files:
+    with open(os.path.join(os.getcwd(), directory, file)) as f:
+        content = f.read()
 
-# print(result[1].statements[1])
+    result = parse_partial_context(content)
+    module = compile_ast(result, file)
+    print(f"======[{file}]======")
+    modules.append(module)
 
-# parse_partial_context("""b: int = 2*12+5""")
-# print(result[1].statements[1])
-module = compile_ast(result)
-print(module)
-get_engine(module)
-sp.run([f"{os.getcwd()}/compile_output"])
+get_engine(modules[0], modules)
 
+compiled_files = " ".join([os.path.join(os.getcwd(), "p2ctemp", f)
+                           for f in os.listdir(os.path.join(os.getcwd(), "p2ctemp"))])
+# print(f"llvm-link {compiled_files} std/main.ll -o output.bc")
 
+sp.run([f"{os.getcwd()}/compile_output", compiled_files])
+sp.run(["clang++", "-fPIE", "-pie", "output.o", "-o", "program"])
+print("COMPILED!")
 # compile_module(module)
 # func, engine = run_module(module)
 # print(func())

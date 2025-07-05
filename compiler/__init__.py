@@ -1,26 +1,34 @@
 from llvmlite import ir
 from ast.ptypes import *
 from llvmlite import binding as llvm
+from .gc import HeapObject, ObjectTracker
+import os
+import os.path as path
 
-
-def evaluate_expression(builder: ir.IRBuilder, expr, scope, context=None):
+def evaluate_expression(builder: ir.IRBuilder, expr, scope,func, context=None):
+    tracker = ObjectTracker.get_tracker(func)
     if isinstance(expr, Constant):
         if expr.tpe == "str":
             chars = usable_types[expr.tpe](expr.value)
             args = [ir.Constant(ir.IntType(32), len(chars))]
             for char in chars:
-                args.append(ir.Constant(ir.IntType(8), char))
-            return builder.call(scope["__p2_make_string"], args)
+                args.append(ir.Constant(ir.IntType(32), char))
+            str_array = builder.call(scope["__p2_make_string"], args)
+            actual_str = builder.call(scope["__p2_str_from_array"], [str_array])
+            tracker.add_object("str", actual_str)
+            return actual_str
         return ir.Constant(scope[expr.tpe], usable_types[expr.tpe](expr.value))
     if isinstance(expr, VariableReference):
-        if not isinstance(scope[expr.var], ir.Argument):
+        if isinstance(scope[expr.var], ir.CallInstr):
+            loaded = builder.call(scope["__p2_str_content"], [scope[expr.var]])
+        elif not isinstance(scope[expr.var], ir.Argument) or isinstance(scope[expr.var], ir.PointerType):
             loaded = builder.load(scope[expr.var])
         else:
             loaded = scope[expr.var]
         return loaded
     if isinstance(expr, BinaryOp):
-        left = evaluate_expression(builder, expr.left, scope)
-        right = evaluate_expression(builder, expr.right, scope)
+        left = evaluate_expression(builder, expr.left, scope, func)
+        right = evaluate_expression(builder, expr.right, scope, func)
         if isinstance(expr.left, Constant):
             tpe_l = scope[expr.left.tpe]
         elif isinstance(expr.left, VariableReference):
@@ -69,12 +77,20 @@ def evaluate_expression(builder: ir.IRBuilder, expr, scope, context=None):
             if expr.op == "%": return builder.call(scope["__p2_mod_div"], [left, right])
 
     if isinstance(expr, FuncCall):
-        args = [evaluate_expression(builder, arg, scope) for arg in expr.args]
+        args = [evaluate_expression(builder, arg, scope, func) for arg in expr.args]
+        ffunc: ir.Function = scope[expr.name]
+        for i, arg in enumerate(args):
+            if i >= len(ffunc.args): continue
+
+            farg = ffunc.args[i]
+            if isinstance(farg.type, ir.PointerType) and arg.type == scope["str"]:
+                args[i] = builder.call(scope["__p2_str_content"], [arg])
+
         return builder.call(scope[expr.name], args)
 
-def handle_var_op(builder: ir.IRBuilder, stmt: VariableOp, scope):
+def handle_var_op(builder: ir.IRBuilder, stmt: VariableOp, scope, func):
     var = scope[stmt.var]
-    value = evaluate_expression(builder, stmt.expression, scope)
+    value = evaluate_expression(builder, stmt.expression, scope, func)
     if stmt.op == "=":
         builder.store(value, var)
 
@@ -114,9 +130,9 @@ def expr_prettify(expression):
     return parts
 
 
-def get_condition_signed(cond, builder: ir.IRBuilder, scope):
+def get_condition_signed(cond, builder: ir.IRBuilder, scope, func):
     if len(cond) == 1:
-        value = evaluate_expression(builder, cond[0], scope)
+        value = evaluate_expression(builder, cond[0], scope, func)
 
         one = ir.Constant(ir.IntType(8), 1)
 
@@ -126,12 +142,12 @@ def get_condition_signed(cond, builder: ir.IRBuilder, scope):
         return builder.icmp_signed("!=", value, ir.Constant(value.type, 0))
 
     if len(cond) == 3 and isinstance(cond[1], ConditionToken):
-        left = evaluate_expression(builder, cond[0], scope)
-        right = evaluate_expression(builder, cond[2], scope)
+        left = evaluate_expression(builder, cond[0], scope, func)
+        right = evaluate_expression(builder, cond[2], scope, func)
 
         return builder.icmp_signed(cond[1].token, left, right)
 
-def handle_conditional_expr(builder: ir.IRBuilder, scope, expr, success, fail):
+def handle_conditional_expr(builder: ir.IRBuilder, scope, expr, success, fail, func):
     parts = expr_prettify(expr)
     elements = []
     for i, cond in enumerate(parts):
@@ -139,7 +155,7 @@ def handle_conditional_expr(builder: ir.IRBuilder, scope, expr, success, fail):
         if isinstance(cond, ConditionToken):
             elements.append(cond)
             continue
-        elements.append(get_condition_signed(cond, builder, scope))
+        elements.append(get_condition_signed(cond, builder, scope, func))
 
     i, final = 1, elements[0]
     while i < len(elements):
@@ -160,37 +176,48 @@ def handle_else_if(elseif: ElifBlock, assigned_label, next_label, scope, func):
     block = func.append_basic_block()
     logic_builder = ir.IRBuilder(block)
     handle_statements(logic_builder, elseif.block, scope, func)
-    handle_conditional_expr(builder, scope, elseif.expr, block, next_label)
+    handle_conditional_expr(builder, scope, elseif.expr, block, next_label, func)
 
 def handle_statements(builder: ir.IRBuilder, statements, scope, func):
+    tracker = ObjectTracker.get_tracker(func)
     for stmt in statements:
         if isinstance(stmt, FuncCall):
             args = []
             for arg in stmt.args:
-                args.append(evaluate_expression(builder, arg, scope))
+                args.append(evaluate_expression(builder, arg, scope, func))
 
-            builder.call(scope[stmt.name], args)
+            ffunc: ir.Function = scope[stmt.name]
+            for i, arg in enumerate(args):
+                if i >= len(ffunc.args): continue
+
+                farg = ffunc.args[i]
+                if isinstance(farg.type, ir.PointerType) and arg.type == scope["strt"]:
+                    obj = builder.call(scope["__p2_str_content"], [arg])
+                    args[i] = obj
+
+            builder.call(ffunc, args)
         if isinstance(stmt, ReturnStatement):
-            print(stmt)
-            builder.ret(evaluate_expression(builder, stmt.expr, scope, {"type":
+            builder.ret(evaluate_expression(builder, stmt.expr, scope, func, {"type":
                                                                             func.function_type.return_type}))
         if isinstance(stmt, VariableCreation):
             if stmt.tpe == "str":
-                tpe = "strt"
+                value = evaluate_expression(builder, stmt.value, scope, func,{"type": scope[stmt.tpe]})
+                tracker.add_object("str", value)
+                scope[stmt.name] = value
             else:
                 tpe = stmt.tpe
-            ptr = builder.alloca(scope[tpe], name=stmt.name)
-            value = evaluate_expression(builder, stmt.value, scope, {"type": scope[stmt.tpe]})
+                ptr = builder.alloca(scope[tpe], name=stmt.name)
+                value = evaluate_expression(builder, stmt.value, scope, func,{"type": scope[stmt.tpe]})
 
-            if value.type != scope[stmt.tpe]:
-                if value.type == scope["float"]:
-                    value = builder.fptosi(value, scope[stmt.tpe])
-                elif value.type == scope["int"]:
-                    value = builder.sitofp(value, scope[stmt.tpe])
+                if value.type != scope[stmt.tpe]:
+                    if value.type == scope["float"]:
+                        value = builder.fptosi(value, scope[stmt.tpe])
+                    elif value.type == scope["int"]:
+                        value = builder.sitofp(value, scope[stmt.tpe])
 
-            builder.store(value, ptr)
-            scope[stmt.name] = ptr
-        if isinstance(stmt, VariableOp): handle_var_op(builder, stmt, scope)
+                builder.store(value, ptr)
+                scope[stmt.name] = ptr
+        if isinstance(stmt, VariableOp): handle_var_op(builder, stmt, scope, func)
         if isinstance(stmt, IfStatement):
             if_main = func.append_basic_block()
             if_main_builder = ir.IRBuilder(if_main)
@@ -210,7 +237,7 @@ def handle_statements(builder: ir.IRBuilder, statements, scope, func):
             if len(labels) > 0:
                 next_label = labels[0]
 
-            handle_conditional_expr(builder, scope, stmt.expr, if_main, next_label)
+            handle_conditional_expr(builder, scope, stmt.expr, if_main, next_label, func)
 
             if stmt.else_block:
                 handle_statements(continue_entry_builder, stmt.else_block, scope, func)
@@ -242,6 +269,7 @@ def function_definition(module, expr: FunctionDefinition, global_scope):
         func = ir.Function(module, head, expr.func_name)
         func.linkage = 'internal'
 
+    tracker = ObjectTracker.create_tracker(func)
     entry = func.append_basic_block("entry")
     builder = ir.IRBuilder(entry)
     scope = {} | global_scope
@@ -256,17 +284,22 @@ def function_definition(module, expr: FunctionDefinition, global_scope):
     if not bblock.block.is_terminated:
         bblock.unreachable()
 
+    bblock.position_before(bblock.block.instructions[-1])
+    return_instr: ir.Ret  = bblock.block.instructions[-1]
+    tracker.free(global_scope, bblock, return_instr)
 
-def compile_ast(file_ast):
-    module = ir.Module(name="P2-main")
 
+def compile_ast(file_ast, filename):
+    module = ir.Module(name=filename)
+
+    str_struct = module.context.get_identified_type("P2String")
     types = {
         "int": ir.IntType(32),
         "float": ir.FloatType(),
         "double": ir.DoubleType(),
         "bool": ir.IntType(8),
         "str": ir.PointerType(),
-        "strt": ir.IntType(8).as_pointer()
+        "strt": ir.PointerType()
     }
 
     head = ir.FunctionType(ir.IntType(32), [ir.IntType(32), ir.IntType(32)])
@@ -274,11 +307,20 @@ def compile_ast(file_ast):
     mod_div = ir.Function(module, head, "p2_mod")
     make_str = ir.Function(module, ir.FunctionType(ir.PointerType(), [ir.IntType(32)], True),
                            "create_string_array")
+    make_p2_str = ir.Function(module, ir.FunctionType(ir.PointerType(), [ir.PointerType()]), "create_string")
+    get_p2_str_content = ir.Function(module,
+                                     ir.FunctionType(ir.PointerType(), [ir.PointerType()]), "get_string_content")
+    free_str = ir.Function(module, ir.FunctionType(ir.VoidType(), [ir.PointerType()]), "free_string")
+
 
     global_scope = {} | types
     global_scope["__p2_floor_div"] = floor_div
     global_scope["__p2_mod_div"] = mod_div
     global_scope["__p2_make_string"] = make_str
+    global_scope["__p2_str_from_array"] = make_p2_str
+    global_scope["__p2_str_content"] = get_p2_str_content
+    global_scope["str__free__"] = free_str
+
     for expr in file_ast:
         if isinstance(expr, FunctionDefinition):
             function_definition(module, expr, global_scope)
@@ -297,7 +339,7 @@ def compile_ast(file_ast):
 
     return module
 
-from ctypes import CFUNCTYPE, c_int, c_bool, cast, c_void_p
+from ctypes import CFUNCTYPE, c_int
 
 
 P2HELPERS = """
@@ -327,7 +369,7 @@ entry:
 }
 """
 
-def get_engine(module: ir.Module):
+def get_engine(module: ir.Module, modules = None):
     llvm.initialize()
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
@@ -340,10 +382,23 @@ def get_engine(module: ir.Module):
     module.triple = llvm.get_default_triple()
     module.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 
-    llvm_ir = str(module)
 
-    with open("output.ll", "w") as f:
-        f.write(llvm_ir)
+    if not path.exists(path.join(os.getcwd(), "p2ctemp")):
+        os.mkdir(path.join(os.getcwd(), "p2ctemp"))
+
+    if modules:
+        for amod in modules:
+            amod.triple = llvm.get_default_triple()
+            amod.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+            ll = llvm.parse_assembly(str(amod))
+            ll.verify()
+
+            with open(path.join(os.getcwd(), "p2ctemp", amod.name + ".ll"), "w") as f:
+                f.write(str(amod))
+
+
+
+    llvm_ir = str(module)
 
     mod = llvm.parse_assembly(llvm_ir)
     mod.verify()
