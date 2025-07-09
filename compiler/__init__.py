@@ -25,7 +25,7 @@ def evaluate_expression(builder: ir.IRBuilder, expr, scope,func, tracker, contex
         if expr.var.startswith("_"):
             return scope[expr.var[1:]].value
 
-        if scope[expr.var].tpe == "ptr":
+        if scope[expr.var].tpe.startswith("ptr"):
             return scope[expr.var].value
 
         if isinstance(scope[expr.var].value, ir.CallInstr):
@@ -39,7 +39,6 @@ def evaluate_expression(builder: ir.IRBuilder, expr, scope,func, tracker, contex
         if isinstance(expr.left, Constant):
             tpe_l = scope[expr.left.tpe]
         elif isinstance(expr.left, VariableReference):
-
             tpe_l = scope[expr.left.var].value.allocated_type
         elif isinstance(expr.left, FuncCall):
             tpe_l = scope[expr.left.name].value.function_type.return_type
@@ -86,6 +85,7 @@ def evaluate_expression(builder: ir.IRBuilder, expr, scope,func, tracker, contex
     if isinstance(expr, FuncCall):
         args = [evaluate_expression(builder, arg, scope, func, tracker) for arg in expr.args]
 
+
         return builder.call(scope[expr.name].value, args)
 
 def handle_var_op(builder: ir.IRBuilder, stmt: VariableOp, scope, func, tracker):
@@ -106,25 +106,17 @@ def expr_prettify(expression):
     if not isinstance(expression, list):
         expression = flatten_condition(expression)
 
-    parts = []
-    i = 0
-    while i < len(expression):
-        part = expression[i]
-
-        if isinstance(part, ConditionToken) and str(part.token) in ("and", "or", "(", ")"):
-            parts.append(part)
-            i += 1
+    parts, builder = [], []
+    for expr in expression:
+        if isinstance(expr, ConditionToken) and expr.token in ["and", "or", "(", ")"]:
+            parts.append(builder)
+            parts.append(expr)
+            builder = []
             continue
 
-        sub = []
-        while i < len(expression):
-            if isinstance(expression[i], ConditionToken) and str(expression[i].token) in ("and", "or", "(", ")"):
-                break
-            sub.append(expression[i])
-            i += 1
+        builder.append(expr)
 
-        parts.append(sub)
-
+    parts.append(builder)
     return parts
 
 def get_condition_signed(cond, builder: ir.IRBuilder, scope, func, tracker):
@@ -139,12 +131,30 @@ def get_condition_signed(cond, builder: ir.IRBuilder, scope, func, tracker):
     if len(cond) == 3 and isinstance(cond[1], ConditionToken):
         left = evaluate_expression(builder, cond[0], scope, func, tracker)
         right = evaluate_expression(builder, cond[2], scope, func, tracker)
+
+        if left.type == ir.PointerType() and right.type == ir.PointerType():
+            if isinstance(cond[0], Constant):
+                tpe_l = cond[0].tpe
+            elif isinstance(cond[0], VariableReference):
+                tpe_l = scope[cond[0].var].tpe
+
+            if isinstance(cond[2], Constant):
+                tpe_r = cond[2].tpe
+            elif isinstance(cond[2], VariableReference):
+                tpe_r = scope[cond[2].var].tpe
+
+            if tpe_l == tpe_r:
+                check = builder.call(scope[f"__t__{tpe_l}__eq__"].value, [left, right])
+                return builder.icmp_signed("==", check, ir.Constant(ir.IntType(8), 1))
+
         return builder.icmp_signed(cond[1].token, left, right)
 
 def handle_conditional_expr(builder: ir.IRBuilder, scope, expr, success, fail, func, tracker: ObjectTracker):
+    print(expr)
     parts = expr_prettify(expr)
     elements = []
 
+    print(parts)
     for cond in parts:
         if not cond:
             continue
@@ -190,15 +200,21 @@ def handle_statements(builder: ir.IRBuilder, statements, scope, func, tracker: O
 
         elif isinstance(stmt, VariableCreation):
             if isinstance(stmt.tpe, SliceOp) and stmt.tpe.var == "ptr":
-                if not isinstance(stmt.value, VariableReference):
-                    raise Exception("Cannot make pointer, provide variable to point to!")
-                scope[stmt.name] = ScopeElement("ptr", scope[stmt.value.var[1:]].value)
+                if isinstance(stmt.value, VariableReference):
+                    scope[stmt.name] = ScopeElement(f"ptr;{stmt.tpe.slices[0]}", scope[stmt.value.var].value)
+                if isinstance(stmt.value, FuncCall):
+                    val = evaluate_expression(builder, stmt.value, scope, func, tracker)
+                    tracker.add_object(stmt.tpe.slices[0], val)
+                    scope[stmt.name] = ScopeElement(f"ptr;{stmt.tpe.slices[0]}", val)
                 continue
 
             if stmt.tpe.var == "str":
                 value = evaluate_expression(builder, stmt.value, scope, func, tracker,{"type": scope[stmt.tpe.var]})
                 tracker.add_object("str", value)
                 scope[stmt.name] = ScopeElement("str", value)
+            elif stmt.tpe.var == "ptr":
+                value = evaluate_expression(builder, stmt.value, scope, func, tracker, {"type": scope[stmt.tpe.var]})
+                scope[stmt.name] = ScopeElement("ptr", value)
             else:
                 tpe = stmt.tpe.var
                 ptr = builder.alloca(scope[tpe], name=stmt.name)
@@ -316,14 +332,20 @@ def compile_ast(file_ast, filename):
     mod_div = ir.Function(module, head, "p2_mod")
     make_str = ir.Function(module, ir.FunctionType(ir.PointerType(), [ir.IntType(32)], True),
                            "create_string_array")
-    free_str = ir.Function(module, ir.FunctionType(ir.VoidType(), [ir.PointerType()]), "free_string")
+    free_str = ir.Function(module, ir.FunctionType(ir.VoidType(), [ir.PointerType()]), "__t__str__free")
+    str_check = ir.Function(module, ir.FunctionType(types["bool"], [types["str"], types["str"]]),
+                            "__t__str__eq__")
+
+    close_file = ir.Function(module, ir.FunctionType(ir.VoidType(), [ir.PointerType()]), "__t__file__close")
 
 
     global_scope = {} | types
     global_scope["__p2_floor_div"] = ScopeElement("func", floor_div)
     global_scope["__p2_mod_div"] = ScopeElement("func", mod_div)
     global_scope["__p2_make_string"] = ScopeElement("func", make_str)
-    global_scope["str__free__"] = ScopeElement("func", free_str)
+    global_scope["__t__str__free__"] = ScopeElement("func", free_str)
+    global_scope["__t__file__free__"] = ScopeElement("func", close_file)
+    global_scope["__t__str__eq__"] = ScopeElement("func", str_check)
 
     for expr in file_ast:
         if isinstance(expr, FunctionDefinition):
@@ -345,34 +367,6 @@ def compile_ast(file_ast, filename):
 
 from ctypes import CFUNCTYPE, c_int
 
-
-P2HELPERS = """
-define i32 @p2_floor(i32 %a, i32 %b) {
-entry:
-  %div = sdiv i32 %a, %b
-  %rem = srem i32 %a, %b
-  %cond = icmp ne i32 %rem, 0
-
-  %xor_ab = xor i32 %a, %b
-  %sign_mismatch = icmp slt i32 %xor_ab, 0
-
-  %need_floor = and i1 %cond, %sign_mismatch
-
-  %div_minus_1 = sub i32 %div, 1
-  %floor_div = select i1 %need_floor, i32 %div_minus_1, i32 %div
-
-  ret i32 %floor_div
-}
-
-define i32 @p2_mod(i32 %a, i32 %b) {
-entry:
-  %floor_div = call i32 @p2_floor(i32 %a, i32 %b)
-  %mul = mul i32 %b, %floor_div
-  %mod = sub i32 %a, %mul
-  ret i32 %mod
-}
-"""
-
 def get_engine(module: ir.Module, modules = None):
     llvm.initialize()
     llvm.initialize_native_target()
@@ -380,8 +374,6 @@ def get_engine(module: ir.Module, modules = None):
     target = llvm.Target.from_default_triple()
     target_machine = target.create_target_machine()
 
-    helper = llvm.parse_assembly(P2HELPERS)
-    helper.verify()
 
     module.triple = llvm.get_default_triple()
     module.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
@@ -404,7 +396,6 @@ def get_engine(module: ir.Module, modules = None):
 
     mod = llvm.parse_assembly(llvm_ir)
     mod.verify()
-    mod.link_in(helper)
 
     engine = llvm.create_mcjit_compiler(mod, target_machine)
 

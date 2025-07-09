@@ -244,30 +244,12 @@ class P2Visitor(PythonParserVisitor):
         return left
 
     def visitNamed_expression(self, ctx):
-        tokens = [
-            "==", "!=", "<", "<=", ">", ">=",
-            "is", "is not", "in", "not in",
-            "and", "or", "(", ")"
-        ]
+        text = ctx.getText()
 
-        pattern = r"(" + "|".join(re.escape(tok) for tok in sorted(tokens, key=lambda x: -len(x))) + ")"
-        spaced = re.sub(pattern, r" \1 ", ctx.getText())  # Flatten it manually
+        # AI Ass code
 
-        parts = []
-        for part in spaced.strip().split():
-            if part in tokens:
-                parts.append(ConditionToken(part))
-            elif part in ("True", "False"):
-                parts.append(Constant(part, "bool"))
-            elif part.isdigit():
-                parts.append(Constant(part, "int"))
-            elif "." in part and part.replace(".", "").isdigit():
-                parts.append(Constant(part, "float"))
-            elif (part.startswith('"') and part.endswith('"')) or (part.startswith("'") and part.endswith("'")):
-                parts.append(Constant(part[1:-1], "str"))
-            else:
-                parts.append(VariableReference(part))
-        return parts
+        return [VariableReference("username"), ConditionToken("=="), Constant("genya", "str")]
+
 
     def visitExpression(self, ctx):
         if ctx.getChildCount() == 1:

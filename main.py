@@ -17,6 +17,7 @@ for file in files:
     result = parse_partial_context(content)
 
     module = compile_ast(result, file)
+    print(module)
     modules.append(module)
 
 get_engine(modules[0], modules)

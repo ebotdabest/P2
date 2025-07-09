@@ -21,7 +21,7 @@ class ObjectTracker:
     def free(self, scope_for_free, builder: ir.IRBuilder, exception: ir.Ret):
         for obj in self.objs:
             if exception and not isinstance(exception, ir.Unreachable) and obj.obj == exception.return_value: continue
-            builder.call(scope_for_free[obj.tpe + "__free__"].value, [obj.obj])
+            builder.call(scope_for_free["__t__" + obj.tpe + "__free__"].value, [obj.obj])
 
     @classmethod
     def create_tracker(cls, func):

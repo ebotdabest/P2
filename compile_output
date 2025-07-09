@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 
-llvm-link $1 std/main.ll -o output.bc
+llvm-link $1 std/main.ll std/quicks.ll -o output.bc
 llc -relocation-model=pic output.bc -filetype=obj -o output.o
 rm output.bc
 #rm -rf p2ctemp
