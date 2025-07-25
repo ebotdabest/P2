@@ -135,6 +135,28 @@ class SliceOp:
         self.var = var
         self.slices = slices
 
+@auto_str
+class ExprStatement:
+    def __init__(self, expr):
+        self.expr = expr
+@auto_str
+class WhileStmt:
+    def __init__(self, expr, stmts):
+        self.expr = expr
+        self.stmts = stmts
+
+class BreakStmt:
+    pass
+
+class ContinueStmt:
+    pass
+
+@auto_str
+class CallChain:
+    def __init__(self, root, calls):
+        self.root = root
+        self.calls = calls
+
 def bool_maker(value):
     if value == "True":
         return 1
@@ -142,6 +164,7 @@ def bool_maker(value):
         return 0
     else:
         return -1
+
 
 def str_maker(value: str) -> list[int]:
     return [ord(char) for char in bytes(value, "utf-8").decode("unicode_escape")]

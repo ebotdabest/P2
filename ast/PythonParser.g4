@@ -34,6 +34,7 @@ THE SOFTWARE.
 // Python 3.13.2  https://docs.python.org/3.13/reference/grammar.html#full-grammar-specification
 
 // THIS VERSION OF THE PRODUCT WAS MODIFIED BY EBotDaBest
+// Modified sections include: import_stmt
 
 parser grammar PythonParser;
 

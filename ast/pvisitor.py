@@ -1,9 +1,12 @@
+import antlr4
+
 from ast import PythonParser
 from ast.gen.PythonParserVisitor import PythonParserVisitor
 from ast.ptypes import *
 from errors import NoTypeError
 from typing import List
-import re
+from ast.expression_parser import parse_expression
+from antlr4.tree.Tree import TerminalNodeImpl
 
 class P2Visitor(PythonParserVisitor):
     def __init__(self):
@@ -16,6 +19,15 @@ class P2Visitor(PythonParserVisitor):
 
     def send_to_top(self, stmt):
         self.statements.append(stmt)
+
+    def visitFactor(self, ctx:PythonParser.FactorContext):
+        if len(ctx.children) == 1:
+            return self.visitChildren(ctx)
+
+        value = self.visit(ctx.children[1])
+        value.value = f"{ctx.children[0].getText()}{value.value}"
+        return value
+
 
     def visitFunction_def_raw(self, ctx):
         func_name = ctx.name().getText()
@@ -74,7 +86,6 @@ class P2Visitor(PythonParserVisitor):
 
     def visitAssignment(self, ctx):
         if ctx.name():
-
             var_name = ctx.name().getText()
 
             tpe = self.visit(ctx.expression())
@@ -83,29 +94,45 @@ class P2Visitor(PythonParserVisitor):
             if ctx.annotated_rhs():
                 value = self.visit(ctx.annotated_rhs())
 
+            if isinstance(value, Constant):
+                if value.tpe.startswith("list-"):
+                    value.tpe = "list-" + tpe.slices[0]
+
             stmt = VariableCreation(var_name, tpe, value)
             self.scope[var_name] = stmt
 
             return stmt
 
         if ctx.augassign():
-            target = ctx.single_target().getText()
+            target = self.visit(ctx.single_target())
             op = ctx.augassign().getText()
             value = self.visit(ctx.star_expressions())
             return VariableOp(target, value, op)
 
-
         if ctx.star_targets():
-            target = ctx.star_targets()[0].getText()
+            target = self.visit(ctx.star_targets()[0])
             value = self.visit(ctx.star_expressions())
             return VariableOp(target, value, "=")
 
         raise Exception("Unhandled assignment case")
 
+    def visitTarget_with_star_atom(self, ctx:PythonParser.Target_with_star_atomContext):
+        text = ctx.getText()
+        if "[" in text:
+            var_name = ctx.children[0].getText()
+            slices = self._parse_literal_or_variable(ctx.children[2].getText())
+
+            return SliceOp(var_name, [slices])
+
+        return self._parse_literal_or_variable(ctx.getText())
+
+    def visitSingle_target(self, ctx:PythonParser.Single_targetContext):
+        return self._parse_literal_or_variable(ctx.getText())
+
     def visitSlices(self, ctx:PythonParser.SlicesContext):
         parent: PythonParser.PrimaryContext = ctx.parentCtx
         var = parent.primary().atom().name().getText()
-        slices = [s.getText() for s in ctx.slice_()]
+        slices = [self._parse_literal_or_variable(s.getText()) for s in ctx.slice_()]
 
         return SliceOp(var, slices)
 
@@ -113,6 +140,7 @@ class P2Visitor(PythonParserVisitor):
         if ctx.yield_expr():
             return self.visit(ctx.yield_expr())
         return self.visit(ctx.star_expressions())
+
 
     def visitBlock(self, ctx):
         statements = []
@@ -122,21 +150,16 @@ class P2Visitor(PythonParserVisitor):
                 statements.append(stmt)
         return statements
 
+
     def visitIf_stmt(self, ctx):
         condition = self.visit(ctx.named_expression())
         then_block = self.visit(ctx.block())
 
         elif_blocks = []
-        else_block = []
+        else_block = None
 
         if ctx.elif_stmt():
-            for child in ctx.elif_stmt():
-                elif_block, tail = self.visit(child)
-                elif_blocks.append(elif_block)
-
-                while tail:
-                    elif_block, tail = tail
-                    elif_blocks.append(elif_block)
+            elif_blocks, else_block = self.visit(ctx.elif_stmt())
 
         if ctx.else_block():
             else_block = self.visit(ctx.else_block())
@@ -146,17 +169,18 @@ class P2Visitor(PythonParserVisitor):
     def visitElif_stmt(self, ctx):
         condition = self.visit(ctx.named_expression())
         block = self.visit(ctx.block())
+        current_block = ElifBlock(condition, block)
 
-        # If there's more to the chain (nested elif or else), return it too
+        elif_blocks = [current_block]
+        else_block = None
+
         if ctx.elif_stmt():
-            tail = self.visit(ctx.elif_stmt())
-            return ElifBlock(condition, block), tail
+            next_elifs, else_block = self.visit(ctx.elif_stmt())
+            elif_blocks.extend(next_elifs)
         elif ctx.else_block():
-            tail = (ElifBlock(condition, block), None)
             else_block = self.visit(ctx.else_block())
-            return ElifBlock(condition, block), (None, else_block)
-        else:
-            return ElifBlock(condition, block), None
+
+        return elif_blocks, else_block
 
     def visitElse_block(self, ctx):
         return self.visit(ctx.block())
@@ -174,6 +198,7 @@ class P2Visitor(PythonParserVisitor):
         if text.isdigit() or (text.startswith('-') and text[1:].isdigit()):
             return Constant(text, "int")
 
+
         return VariableReference(text)
 
     def _is_float(self, s):
@@ -184,24 +209,63 @@ class P2Visitor(PythonParserVisitor):
             return False
 
     def visitPrimary(self, ctx):
-        if len(ctx.children) > 1 and ctx.children[1].getText() == "(":
-            func_name = ctx.children[0].getText()
-            if ctx.arguments():
-                args = [self.visit(expr) for expr in ctx.arguments().args().expression()]
-            else:
-                args = []
-            return FuncCall(func_name, args)
-
         if ctx.slices():
-            return self.visitSlices(ctx.slices())
+            return self.visit(ctx.slices())
 
-        atom = ctx.atom()
+        current = ctx
+        call_chain = []
+
+        while hasattr(current, 'children'):
+            children = current.children
+
+            if len(children) > 1 and children[1].getText() == "(":
+                func_ctx = children[0]
+
+                if hasattr(func_ctx, 'children') and len(func_ctx.children) >= 3 and func_ctx.children[
+                    1].getText() == '.':
+                    method_name = func_ctx.children[2].getText()
+                    root_ctx = func_ctx.children[0]
+                else:
+                    method_name = func_ctx.getText()
+                    root_ctx = None
+
+                if current.arguments():
+                    args = [self.visit(arg) for arg in current.arguments().args().expression()]
+                else:
+                    args = []
+
+                call_chain.insert(0, FuncCall(method_name, args))
+
+                if root_ctx:
+                    current = root_ctx
+                else:
+                    break
+            else:
+                break
+
+        atom = current.atom()
         if atom:
-            atom_text = atom.getText()
-            return self._parse_literal_or_variable(atom_text)
+            if atom.list_():
+                root = self.visit(atom.list_())
+            else:
+                root = self._parse_literal_or_variable(atom.getText())
+        else:
+            root = self.visitChildren(current)
 
+        if not call_chain:
+            return root
+        elif len(call_chain) == 1 and isinstance(root, str) and root is None:
+            return call_chain[0]
+        else:
+            if not root:
+                return call_chain[0]
+            return CallChain(root, call_chain)
 
-        return self.visitChildren(ctx)
+    def visitList(self, ctx:PythonParser.ListContext):
+        if len(ctx.children) == 2:
+            return Constant([], "list-")
+
+        return self.visit(ctx.getChild(1))
 
     def visitSum(self, ctx):
         return self._parse_bin_chain(ctx)
@@ -225,6 +289,11 @@ class P2Visitor(PythonParserVisitor):
             result = self.visit(child)
             if result is not None:
                 return result
+
+        if str(ctx.children[0]) == "break":
+            return BreakStmt()
+        elif str(ctx.children[0]) == "continue":
+            return ContinueStmt()
         return None
 
     def visitTerm(self, ctx):
@@ -245,11 +314,9 @@ class P2Visitor(PythonParserVisitor):
 
     def visitNamed_expression(self, ctx):
         text = ctx.getText()
+        expr = parse_expression(text)
 
-        # AI Ass code
-
-        return [VariableReference("username"), ConditionToken("=="), Constant("genya", "str")]
-
+        return expr
 
     def visitExpression(self, ctx):
         if ctx.getChildCount() == 1:
@@ -312,12 +379,13 @@ class P2Visitor(PythonParserVisitor):
 
         header = sig.import_params_header()
         param_list = []
-        if header.import_params():
-            for param in header.import_params().import_param():
-                param_list.append(self.visit(param))
+        if header:
+            if header.import_params():
+                for param in header.import_params().import_param():
+                    param_list.append(self.visit(param))
 
-        if header.import_va_args():
-            param_list.append(VAArgs())
+            if header.import_va_args():
+                param_list.append(VAArgs())
 
         ret_type = None
         if sig.import_return_type():
@@ -343,6 +411,20 @@ class P2Visitor(PythonParserVisitor):
     def visitStar_expression(self, ctx:PythonParser.Star_expressionContext):
         return self.visitChildren(ctx)
 
+    def visitStar_named_expressions(self, ctx:PythonParser.Star_named_expressionsContext):
+        value = []
+        for child in ctx.children:
+            r = self.visit(child)
+            if r:
+                value.append(r.expr)
+
+        return Constant(value, "list")
+
+
+    def visitStar_named_expression(self, ctx:PythonParser.Star_named_expressionContext):
+        return self.visit(ctx.named_expression())
+
+
     def visitGlobal_stmt(self, ctx):
         symbols = [n.getText() for n in ctx.name()]
         self.send_to_top(GlobalStmt(symbols))
@@ -353,3 +435,9 @@ class P2Visitor(PythonParserVisitor):
             flat.append(tup[0])
             tup = tup[1]
         return flat, tup[1] if tup else []
+
+    def visitWhile_stmt(self, ctx:PythonParser.While_stmtContext):
+        expr = self.visit(ctx.getChild(1))
+        stmts = self.visit(ctx.children[-1])
+
+        return WhileStmt(expr, stmts)
