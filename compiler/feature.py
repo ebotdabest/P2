@@ -5,9 +5,26 @@ def generate_head(rt, va_args, *args):
 
 int_t = ir.IntType(32)
 bool_t = ir.IntType(8)
+bool_s_t = ir.IntType(1)
 ptr = ir.PointerType()
 void = ir.VoidType()
 
+class TokenType(ir.types.Type):
+    def __init__(self):
+        self._name = "token"
+        self._is_first_class = True
+
+    def __str__(self):
+        return self._name
+
+    def __eq__(self, other):
+        return isinstance(other, TokenType)
+
+    def __hash__(self):
+        return hash(self._name)
+
+
+token_t = TokenType()
 FUNCTIONS = {
     "__p2_make_string": (generate_head(ptr, True, int_t), "create_string_array", "str"),
     "__t__str__free": (generate_head(void, False, ptr), "__t__str__free", "func"),
@@ -19,14 +36,30 @@ FUNCTIONS = {
     "__t__list____set_element__": (generate_head(ptr, False, ptr, ptr, int_t), "vector_insert_into", "ptr"),
     "__p2_floor_div": (generate_head(int_t, False, int_t, int_t), "p2_floor", "int"),
     "__p2_mod_div": (generate_head(int_t, False, int_t, int_t), "p2_mod", "int"),
-    "__t__list____len__": (generate_head(int_t, False, ptr), "vector_size", "int")
+    "__t__list____len__": (generate_head(int_t, False, ptr), "vector_size", "int"),
+    "|llvm.coro.id": (generate_head(token_t, False, int_t, ptr, ptr, ptr), "@llvm.coro.id", "token"),
+    "|llvm.coro.alloc": (generate_head(bool_s_t, False, token_t), "@llvm.coro.alloc", "token"),
+    "|llvm.coro.begin": (generate_head(ptr, False, token_t, ptr), "@llvm.coro.begin", "ptr"),
+    "|llvm.coro.suspend": (generate_head(bool_t, False, token_t, bool_s_t), "@llvm.coro.suspend",
+                           "bool"),
+    "|llvm.coro.free": (generate_head(ptr, False, token_t, ptr), "@llvm.coro.free", "ptr"),
+    "|llvm.coro.end": (generate_head(bool_s_t, False, ptr, bool_s_t, token_t), "@llvm.coro.end",
+                       "bool"),
+    "|llvm.coro.promise": (generate_head(ptr, False, ptr, int_t, bool_s_t), "@llvm.coro.promise", "ptr")
 }
 
 def request_feature(module: ir.Module, name):
+    """
+    Requests a backend function for easier to read and less bloated llvm ir
+    :param module: the module used for the ir
+    :param name: the name of the feature
+    :return:
+    """
     head = FUNCTIONS[name]
     for func in module.functions:
         if func.name == head[1]:
             return func, head[2]
+
     return ir.Function(module, head[0], head[1]), head[2]
 
 # global_scope = {} | types

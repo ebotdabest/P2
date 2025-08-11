@@ -6,12 +6,23 @@ import os
 import os.path as path
 from .feature import request_feature, FUNCTIONS
 
+
 class ScopeElement:
     def __init__(self, tpe, value):
         self.tpe = tpe
         self.value = value
+
+
 target_machine: llvm.TargetMachine = None
+
+
 def get_element_tpe(expr, scope):
+    """
+    Returns the elements type from the scope
+    :param expr: the AST expression
+    :param scope: the current scope dict
+    :return:
+    """
     if isinstance(expr, FuncCall):
         return scope[expr.name].tpe
     if isinstance(expr, VariableReference):
@@ -23,6 +34,11 @@ def get_element_tpe(expr, scope):
 
 
 def get_binding_type_size(ir_type):
+    """
+    Gets the ABI size of an element for example for vectors etc
+    :param ir_type: The llvm.ir type of the element's size
+    :return:
+    """
     dummy_module = ir.Module(name="dummy")
     dummy_global = ir.GlobalVariable(dummy_module, ir_type, name="dummy_var")
 
@@ -34,7 +50,16 @@ def get_binding_type_size(ir_type):
 
     return target_machine.target_data.get_abi_size(binding_type)
 
+
 def create_array(builder: ir.IRBuilder, tpe, size, values):
+    """
+    Creates an array from the type and size
+    :param builder: the ir builder
+    :param tpe: the type of the array
+    :param size: the size of the array
+    :param values: the values inside the array
+    :return:
+    """
     arr = ir.ArrayType(tpe, size)
     ptr = builder.alloca(arr)
     indice = ir.Constant(ir.IntType(32), 0)
@@ -47,7 +72,19 @@ def create_array(builder: ir.IRBuilder, tpe, size, values):
 
     return ptr
 
-def evaluate_expression(builder: ir.IRBuilder, expr, scope,func, tracker, context=None):
+
+def evaluate_expression(builder: ir.IRBuilder, expr, scope, func, tracker, context=None):
+    """
+    Evaluates an AST expression to get an ir element ready to use
+    Useful almost everytime since it lets an AST element be instantly used in ir
+    :param builder: the current ir builder
+    :param expr: the AST expression
+    :param scope: the current scope dict
+    :param func: the function / block that will house the expression
+    :param tracker: the GC tracker for the block
+    :param context: Additional context arguments
+    :return:
+    """
     if isinstance(expr, Constant):
         if expr.tpe == "str":
             chars = usable_types[expr.tpe](expr.value)
@@ -192,7 +229,7 @@ def evaluate_expression(builder: ir.IRBuilder, expr, scope,func, tracker, contex
             if isinstance(call, FuncCall):
                 if i == 0:
                     args = call.args.copy()
-                    args.insert(0,root)
+                    args.insert(0, root)
                     tpe = get_element_tpe(root, scope)
                     root_call = FuncCall(FORMAT.format(tpe, call.name), args)
                     continue
@@ -211,18 +248,27 @@ def evaluate_expression(builder: ir.IRBuilder, expr, scope,func, tracker, contex
             index = evaluate_expression(builder, expr.slices[0], scope, func, tracker, context)
 
             ptr = builder.gep(variable.value, [ir.Constant(ir.IntType(32), 0),
-                                            index])
+                                               index])
             value = builder.load(ptr)
             return value
         else:
             index_value = evaluate_expression(builder, expr.slices[0], scope, func, tracker, context)
             result = builder.call(scope[f"__t__{variable.tpe}____index__"].value, [variable.value,
-                                                           index_value])
+                                                                                   index_value])
             return result
 
     return expr
 
+
 def handle_var_op_op(builder, var, value, op):
+    """
+    Handles a variable operations operators
+    :param builder: the current builder
+    :param var: the variable
+    :param value: the value
+    :param op: the operator
+    :return:
+    """
     if op == "=":
         builder.store(value, var)
     elif op == "+=":
@@ -242,7 +288,17 @@ def handle_var_op_op(builder, var, value, op):
         final_value = builder.sdiv(var_value, value)
         builder.store(final_value, var)
 
+
 def handle_var_op(builder: ir.IRBuilder, stmt: VariableOp, scope, func, tracker):
+    """
+    Handles a variable operation
+    :param builder: the current builder
+    :param stmt: the variable OP statement
+    :param scope: the current scope
+    :param func: the housing function
+    :param tracker: the current GC tracker
+    :return:
+    """
     value = evaluate_expression(builder, stmt.expression, scope, func, tracker)
     if isinstance(stmt.var, SliceOp):
         var_name = stmt.var.var
@@ -261,7 +317,13 @@ def handle_var_op(builder: ir.IRBuilder, stmt: VariableOp, scope, func, tracker)
 
         handle_var_op_op(builder, var, value, stmt.op)
 
+
 def flatten_condition(expr):
+    """
+    Flattens a condition for easier use
+    :param expr: the expression for the conditions
+    :return:
+    """
     if isinstance(expr, BinaryOp):
         return flatten_condition(expr.left) + [ConditionToken(expr.op)] + flatten_condition(expr.right)
     elif isinstance(expr, UnaryOp):
@@ -269,7 +331,13 @@ def flatten_condition(expr):
     else:
         return [expr]
 
+
 def expr_prettify(expression):
+    """
+    Prettifies the expression so the compiler can handle it easier
+    :param expression: the AST expression
+    :return:
+    """
     if not isinstance(expression, list):
         expression = flatten_condition(expression)
 
@@ -286,7 +354,17 @@ def expr_prettify(expression):
     parts.append(builder)
     return parts
 
+
 def get_condition_signed(cond, builder: ir.IRBuilder, scope, func, tracker):
+    """
+    Handles conditions and returns the ir condition allowing for branching etc
+    :param cond: the flattened condition
+    :param builder: the current builder
+    :param scope: the scope dict
+    :param func: the housing function
+    :param tracker: the current gc tracker
+    :return:
+    """
     if len(cond) == 1:
         value = evaluate_expression(builder, cond[0], scope, func, tracker)
         one = ir.Constant(ir.IntType(8), 1)
@@ -316,7 +394,19 @@ def get_condition_signed(cond, builder: ir.IRBuilder, scope, func, tracker):
 
         return builder.icmp_signed(cond[1].token, left, right)
 
+
 def handle_conditional_expr(builder: ir.IRBuilder, scope, expr, success, fail, func, tracker: ObjectTracker):
+    """
+    Handles a condition and branching based on AST expression
+    :param builder: the builder
+    :param scope: the scope dict
+    :param expr: the AST expression
+    :param success: where to branch if the condition is true
+    :param fail: where to branch if the condition is false
+    :param func: the housing function
+    :param tracker: the current GC tracker
+    :return:
+    """
     parts = expr_prettify(expr)
     elements = []
 
@@ -342,7 +432,18 @@ def handle_conditional_expr(builder: ir.IRBuilder, scope, expr, success, fail, f
     builder.cbranch(final, success, fail)
 
 
-def handle_else_if(elseif: ElifBlock, scope, func, condition_label, continue_entry, extra = None):
+def handle_else_if(elseif: ElifBlock, scope, func, condition_label, continue_entry, extra=None):
+    """
+    Handles an else-if clause
+    :param elseif: the ElseIf AST Block
+    :param scope: the current scope dict
+    :param func: the housing function
+    :param condition_label: the condition label aka what label to GO TO from the if it it fails
+    :param continue_entry: the next entry (after the else-if can be next condition_label or continue entry
+    :param extra: any extra data
+    :return:
+    """
+
     body = func.append_basic_block("else_if_body")
     condition_builder = ir.IRBuilder(condition_label)
     body_builder = ir.IRBuilder(body)
@@ -364,6 +465,15 @@ def handle_else_if(elseif: ElifBlock, scope, func, condition_label, continue_ent
 
 
 def handle_else(else_content, scope, func, next_label, extra=None):
+    """
+    Handles else clauses
+    :param else_content: A list of statements inside the else
+    :param scope: the current scope
+    :param func: the housing function
+    :param next_label: the next label after the else
+    :param extra: any extra data
+    :return:
+    """
     else_block = func.append_basic_block("else_body")
     else_builder = ir.IRBuilder(else_block)
     else_tracker = ObjectTracker.create_tracker(else_block)
@@ -373,7 +483,19 @@ def handle_else(else_content, scope, func, next_label, extra=None):
 
     return else_block
 
+
 def handle_statements(builder: ir.IRBuilder, statements, scope, func, tracker: ObjectTracker, extra=None):
+    """
+    Handles all statements might find duplicates with evaluate_expression
+    Allows for a list of statements to be turned into IR right away
+    :param builder: the builder
+    :param statements: the list of statements
+    :param scope: the current scope
+    :param func: the housing function
+    :param tracker: the current GC tracker
+    :param extra: any extra data
+    :return:
+    """
     if extra is None:
         extra = {}
     ret = None
@@ -394,7 +516,8 @@ def handle_statements(builder: ir.IRBuilder, statements, scope, func, tracker: O
 
         elif isinstance(stmt, ReturnStatement):
             # tracker.free(scope, builder, None)
-            ret = builder.ret(evaluate_expression(builder, stmt.expr, scope, func, tracker,{"type": func.function_type.return_type}))
+            ret = builder.ret(
+                evaluate_expression(builder, stmt.expr, scope, func, tracker, {"type": func.function_type.return_type}))
 
         elif isinstance(stmt, VariableCreation):
             if isinstance(stmt.tpe, SliceOp) and stmt.tpe.var == "ptr":
@@ -407,7 +530,7 @@ def handle_statements(builder: ir.IRBuilder, statements, scope, func, tracker: O
                 continue
 
             if stmt.tpe.var == "str":
-                value = evaluate_expression(builder, stmt.value, scope, func, tracker,{"type": scope[stmt.tpe.var]})
+                value = evaluate_expression(builder, stmt.value, scope, func, tracker, {"type": scope[stmt.tpe.var]})
                 tracker.add_object("str", value)
                 scope[stmt.name] = ScopeElement("str", value)
             elif stmt.tpe.var == "ptr":
@@ -419,12 +542,13 @@ def handle_statements(builder: ir.IRBuilder, statements, scope, func, tracker: O
             elif stmt.tpe.var == "arr":
 
                 value = evaluate_expression(builder, stmt.value, scope, func, tracker, {"type": "arr",
-                                                                                "arr_type": scope[stmt.tpe.slices[0].var]})
+                                                                                        "arr_type": scope[
+                                                                                            stmt.tpe.slices[0].var]})
                 scope[stmt.name] = ScopeElement(f"arr-{stmt.tpe.slices[0]}", value)
             else:
                 tpe = stmt.tpe.var
                 ptr = builder.alloca(scope[tpe], name=stmt.name)
-                value = evaluate_expression(builder, stmt.value, scope, func, tracker,{"type": scope[stmt.tpe.var]})
+                value = evaluate_expression(builder, stmt.value, scope, func, tracker, {"type": scope[stmt.tpe.var]})
 
                 if value.type != scope[stmt.tpe.var]:
                     if value.type == scope["float"]:
@@ -465,7 +589,8 @@ def handle_statements(builder: ir.IRBuilder, statements, scope, func, tracker: O
                             eit = ObjectTracker.create_tracker(final_else_if)
                             handle_statements(final_else_if_builder, ei.block, scope, func, eit, extra)
 
-                            handle_conditional_expr(condition_builder, scope, ei.expr.expr, final_else_if, else_block, func, ct)
+                            handle_conditional_expr(condition_builder, scope, ei.expr.expr, final_else_if, else_block,
+                                                    func, ct)
                             if not final_else_if.is_terminated:
                                 final_else_if_builder.branch(continue_entry)
                             break
@@ -473,8 +598,6 @@ def handle_statements(builder: ir.IRBuilder, statements, scope, func, tracker: O
                             condition_label = handle_else_if(ei, scope, func, condition_label, continue_entry)
                     else:
                         condition_label = handle_else_if(ei, scope, func, condition_label, continue_entry)
-
-
 
             elif stmt.else_block:
                 else_block = handle_else(stmt.else_block, scope, func, continue_entry)
@@ -529,7 +652,7 @@ def handle_statements(builder: ir.IRBuilder, statements, scope, func, tracker: O
                 if isinstance(call, FuncCall):
                     if i == 0:
                         args = call.args.copy()
-                        args.insert(0,root)
+                        args.insert(0, root)
                         tpe = get_element_tpe(root, scope)
                         root_call = FuncCall(FORMAT.format(tpe, call.name), args)
                         continue
@@ -541,13 +664,40 @@ def handle_statements(builder: ir.IRBuilder, statements, scope, func, tracker: O
 
             evaluate_expression(builder, root_call, scope, func, tracker)
 
-
     # if not builder.block.is_terminated:
     #     tracker.free(scope, builder, ret)
 
     return builder
 
+def handle_generator_function(builder: ir.IRBuilder, return_type, global_scope):
+    """
+    Handles a function with the return type of 'gen'
+    Accounts for steps, yields, and runtime context based on context and scope alone
+    :param builder:
+    :param return_type:
+    :param global_scope:
+    :return:
+    """
+
+    ptr = builder.alloca(return_type)
+    coro_id = global_scope["|llvm.coro.id"]
+    null_ptr = ir.Constant(ir.PointerType(), None)
+    builder.call(coro_id.value, [ir.Constant(ir.IntType(32), 0), ptr, null_ptr, null_ptr])
+
+
+
+
+
+
+
 def function_definition(module, expr: FunctionDefinition, global_scope):
+    """
+    Handles a functions declaration
+    :param module: the module
+    :param expr: the AST expression
+    :param global_scope: the global scope to place the function into
+    :return:
+    """
     args = []
     for arg in expr.args:
         if isinstance(arg, FuncArg):
@@ -561,8 +711,13 @@ def function_definition(module, expr: FunctionDefinition, global_scope):
     if expr.func_name in global_scope:
         func = global_scope[expr.func_name].value
     else:
-        head = ir.FunctionType(global_scope[expr.return_type] if expr.return_type else ir.VoidType(), args)
+        if expr.return_type.var == "gen":
+            head = ir.FunctionType(global_scope["ptr"], args)
+        else:
+            head = ir.FunctionType(global_scope[expr.return_type.var] if expr.return_type else ir.VoidType(), args)
+
         func = ir.Function(module, head, expr.func_name)
+
         if expr.func_name != "main":
             func.linkage = 'internal'
 
@@ -581,9 +736,14 @@ def function_definition(module, expr: FunctionDefinition, global_scope):
         builder.store(func.args[i], ptr)
         scope[arg.name] = ScopeElement(arg.tpe, ptr)
 
+    if expr.return_type.var == "gen":
+        pass
 
+    handle_generator_function(builder, ir.IntType(32), global_scope)
     global_scope[expr.func_name] = ScopeElement(expr.return_type, func)
     bblock = handle_statements(builder, expr.statements, scope, func, tracker)
+
+    # print(bblock.function.blocks[2].instructions)
 
     if bblock.function.function_type.return_type == ir.VoidType():
         bblock.ret_void()
@@ -592,15 +752,16 @@ def function_definition(module, expr: FunctionDefinition, global_scope):
         bblock.unreachable()
 
 
-def extern_declare(mod, func_name, rt, args, va=False):
-    head = ir.FunctionType(rt, args, va)
-    return ir.Function(mod, head, func_name)
-
 class GlobalScope(dict):
+    """
+    The Scope used throughout the entire compiled source
+    Defined here it acts exactly like a list with the extra ability to feature request
+    """
     def __init__(self, module):
         super().__init__()
         self.values = {}
         self.mod: ir.Module = module
+        self.hidden_values = {}
 
     def __setitem__(self, key, value):
         self.values[key] = value
@@ -617,8 +778,20 @@ class GlobalScope(dict):
     def add_global(self, key, value):
         self.values[key] = value
 
+    @property
+    def hidden(self):
+        return self.hidden_values
+
+    def set_hidden(self, key, value):
+        self.hidden_values[key] = value
 
 def compile_ast(file_ast, filename):
+    """
+    Compiles the the entire AST into a singular module
+    :param file_ast: the AST
+    :param filename: the name of the file
+    :return:
+    """
     module = ir.Module(name=filename)
 
     types = {
@@ -632,6 +805,7 @@ def compile_ast(file_ast, filename):
     }
 
     global_scope = GlobalScope(module)
+    global_scope.set_hidden("gen_index", 0)
     global_scope.values = types
 
     for expr in file_ast:
@@ -650,11 +824,14 @@ def compile_ast(file_ast, filename):
 
         if isinstance(expr, GlobalStmt):
             for symbol in expr.names:
-                if symbol in global_scope.keys(): global_scope[symbol].value.linkage = ''
+                if symbol in global_scope.values.keys():
+                    global_scope[symbol].value.linkage = ''
 
     return module
 
+
 from ctypes import CFUNCTYPE, c_int
+
 
 def setup_default_compiler():
     global target_machine
@@ -665,10 +842,10 @@ def setup_default_compiler():
     target = llvm.Target.from_default_triple()
     target_machine = target.create_target_machine()
 
-def get_engine(module: ir.Module, modules = None):
+
+def get_engine(module: ir.Module, modules=None):
     module.triple = llvm.get_default_triple()
     module.data_layout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
-
 
     if not path.exists(path.join(os.getcwd(), "p2ctemp")):
         os.mkdir(path.join(os.getcwd(), "p2ctemp"))
@@ -687,7 +864,6 @@ def get_engine(module: ir.Module, modules = None):
             with open(path.join(os.getcwd(), "p2ctemp", mod.name + ".ll"), "w") as f:
                 f.write(mod_ir)
 
-
     llvm_ir = str(module)
     llvm_ir = llvm_ir.replace("ptr*", "ptr")
 
@@ -700,12 +876,14 @@ def get_engine(module: ir.Module, modules = None):
 
     return engine, target_machine, mod
 
+
 def run_module(module):
     engine, target_machine, mod = get_engine(module)
     func_ptr = engine.get_function_address("main")
 
     func = CFUNCTYPE(c_int)(func_ptr)
     return func, engine
+
 
 def compile_module(module):
     engine, target_machine, mod = get_engine(module)

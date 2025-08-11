@@ -108,7 +108,7 @@ extern "C" {
     }
 
     EXPORT size_t vector_size(P2Vector* vector) {
-        return vector->size - 1;
+        return vector->size;
     }
 
     EXPORT void* vector_insert_into(P2Vector* vector, void* value, int index) {
@@ -118,7 +118,5 @@ extern "C" {
         vector->size += 1;
         return value;
     }
-    //====================LISTS========================
-
-    
+    //====================LISTS======================== 
 }

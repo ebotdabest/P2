@@ -42,7 +42,7 @@ class P2Visitor(PythonParserVisitor):
         # Find "-> type"
         for i, child in enumerate(ctx.children):
             if child.getText() == "->":
-                return ctx.getChild(i + 1).getText()
+                return self.visit(ctx.getChild(i + 1))
         return None
 
     def _extract_parameters(self, ctx) -> List:

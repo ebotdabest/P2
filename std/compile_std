@@ -1,0 +1,3 @@
+#!/bin/bash
+
+clang++ -S std.cpp -emit-llvm -o main.ll
